@@ -30,15 +30,15 @@ for (vessel in unique(df2$VN)){
         Xsp <- smooth.basis(argvals=df.aux$percent_miles_hat,
                             y=unlist(df.aux[,1]), fdParobj=basis)
         Xi[, 1] = as.vector(eval.fd(abscissa, Xsp$fd))
-        Xi[, 1]  = ( Xi[, 1] - mean(Xi[, 1])) / var(Xi[, 1])
+        #Xi[, 1]  = ( Xi[, 1] - mean(Xi[, 1])) / var(Xi[, 1])
         Xi[, 18] = as.vector(eval.fd(abscissa, Xsp$fd, Lfdobj = 1))
-        Xi[, 18] = (Xi[, 18] - mean(Xi[, 18]) ) / var(Xi[, 18])
+        #Xi[, 18] = (Xi[, 18] - mean(Xi[, 18]) ) / var(Xi[, 18])
       }
       else{
         Xsp <- smooth.basis(argvals=df.aux$percent_miles_hat,
                             y=unlist(df.aux[,1]), fdParobj=basis)
         Xi[ , p] = as.vector(eval.fd(abscissa, Xsp$fd))
-        Xi[ , p] = ( Xi[ , p] - mean(Xi[ , p]) ) / var(Xi[ , p])
+        #Xi[ , p] = ( Xi[ , p] - mean(Xi[ , p]) ) / var(Xi[ , p])
       }
     }
     vessels <- c(vessels, vessel)
@@ -49,12 +49,39 @@ for (vessel in unique(df2$VN)){
   )
 }
 X <- X[, 1:(i-1), ]
-matplot(t(X[,,1]), type='l')
+
+
+matplot(t(X[,,17]), type='l')
 #colnames(X) = abscissa
 #rownames(X) = vesses
-ships.fd <- Data2fd(y = X, argvals = abscissa, basisobj = basis)
+dim(X)
+for (p in 1:18){
+  mu_hat <- apply(X[, ,p], MARGIN = 1, FUN = mean)
+  sd_hat <- apply(X[, ,p], MARGIN = 1, FUN = sd)
+  X[, ,p] = (X[, ,p] - mu_hat) / sd_hat  # normalise all data
+}
+to_keep <- NULL
+for (p in 1:18){
+  tryCatch({
+    matplot(t(X[,,p]), type='l')
+    to_keep <- c(to_keep, p)
+    
+    
+  }, 
+           error=function(e){
+             to_drop <- c(to_drop, p)
+             print(p)
+             print(e)
+           }
+  )
+  
+}
+    
+
+ships.fd <- Data2fd(y = X[,,to_keep], argvals = abscissa, basisobj = basis)
 ships.fd$fdnames$reps <- vessels
-save(ships.fd, file="shipsfd.RData")
+#save(ships.fd, file="shipsfd.RData")
+save(ships.fd, file="shipsfd_2.RData")
 setwd("~/PycharmProjects/SDA-Functional-Control-Charts/")
 load("shipsfd.RData")
 ships.fd$fdnames$values <- # TODO
@@ -64,7 +91,10 @@ library(fda)
 x11()
 plot.fd(ships.fd[1:30])
 ships.fd$coefs
-pca_W.1 <- pca.fd(ships.fd[1:60],nharm=50,centerfns=TRUE)
+for (p in 1:18){
+  
+}
+pca_W.1 <- pca.fd(ships.fd[1:60],nharm=50,centerfns=F)
 dim(pca_W.1$scores)
 
 
@@ -72,9 +102,9 @@ plot(pca_W.1$values[1:35],xlab='j',ylab='Eigenvalues')
 plot(cumsum(pca_W.1$values)[1:35]/sum(pca_W.1$values),xlab='j',ylab='CPV',ylim=c(0.8,1))
 
 dim(apply(pca_W.1$scores[, 1:7,], MARGIN = 1, FUN = sum))
-X <- array(0, c(60,50))
+X <- array(0, c(60,20))
 for (i in 1:60){
-  X[i,] <- apply(pca_W.1$scores[i,1:50,], MARGIN = 1, FUN = sum)
+  X[i,] <- apply(pca_W.1$scores[i,1:20,], MARGIN = 1, FUN = sum)
 }
 
 fit <- lm (y[1:60]~ X)
@@ -82,7 +112,7 @@ summary(fit)
 
 
 
-# prepare cotrol chart and other stuff. 
+  # prepare cotrol chart and other stuff. 
 T2 <- X^2 # square element - wise
 for ( i in ncol(T2)){
   T2[,i] = T2[,i] / pca_W.1$values[i]
@@ -289,6 +319,84 @@ rownames(Z_test) <- test_ind
 
 
 
+###
+library(fda)
+load("shipsfd_2.RData")
+
+indices_train <- 1:60
+# perform the FPCA on the first 60 samples
+pca_W.1 <- pca.fd(ships.fd[indices_train],nharm=50,centerfns=F)
+
+# PREPARE TRAINING SET
+
+keep_pcs <- 15 # keep scores on up to keep_pcs components
+Z <- array(0, c(60,keep_pcs))
+for (i in 1:60){
+  Z[i,] <- apply(pca_W.1$scores[i,1:keep_pcs,], MARGIN = 1, FUN = sum)
+}
+Z <- as.data.frame(Z)  # done preparing the under control set
+rownames(Z) = indices_train    
+
+# OBTAIN T2 statistic on the training set
+SPE <- Z^2 # square element-wise
+T2 <- SPE
+for ( i in ncol(T2)){
+  T2[,i] = SPE[,i] / pca_W.1$values[i]
+}
+T2 <- apply(T2, MARGIN = 1, FUN = sum)
+SPE <- SPE[,~keep_pcs]
+print(dim(SPE))
+SPE <- apply(SPE, MARGIN = 1, FUN = sum)
+
+# set up upper control limits. 4 sdev for 93.75% of data (CHEBYSEV)
+UCL.T2 <- mean(T2) + sd(T2) * 4 
+UCL.SPE <- mean(SPE) + sd(SPE) * 4 
+
+# OBTAIN "ONLINE" SET
+
+### PREDICT SCORES ON NEW FUNCTIONAL SAMPLE
+predictFPCA <- function(pca_obj, fdobj, nharm=25, nvar=3){
+  # Center (crucial!)
+  # fdobj$coefs <- fdobj$coefs - pca_obj$meanfd$coefs[,1,]
+  
+  harmscr  <- array(0, c(nharm, nvar))
+  coefarray <- fdobj$coefs
+  harmcoefarray <- (pca_obj$harmonics)$coefs
+  basisobj <- fdobj$basis
+  for (j in 1:nvar) {
+    fdobjj  <- fd(as.matrix(coefarray[,j]), basisobj)
+    harmfdj <- fd(as.matrix(harmcoefarray[,,j]), basisobj)
+    harmscr[,j] <- inprod(fdobjj, harmfdj)
+  }
+  return (harmscr)
+}
+
+load("y_C02_emissions.RData")
+indices_test <- (1:dim(y)[1])[-indices_train]
+y_na <- c(292, 508, 705)
+y <- y[-y_na, ]
+indices_test <- indices_test[-y_na]
+y = y[1:913,]
+Z_test <- array(0, dim = c(length(indices_test), keep_pcs) )
+ok.ships <- NULL
+k = 0
+for (i in indices_test){
+  tryCatch({
+    cur.curve <- ships.fd[ i ]
+    scores <- predictFPCA(pca_W.1, cur.curve, nharm=50, nvar=9)
+    Z_test[k, ] = apply(scores[1:keep_pcs,], MARGIN = 1, FUN = sum)
+    k = k+1
+    ok.ships <- c(ok.ships, i)
+  },
+  error = function(e){
+    print(e)
+    print(i)
+  })
+  
+}  
+Z_test <- as.data.frame(Z_test)
+print(problematic.ships)
+y <- as.data.frame(y)
 
 
 
